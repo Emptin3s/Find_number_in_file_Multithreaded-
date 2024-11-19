@@ -21,8 +21,8 @@ std::mutex mtx; // Для защиты очереди файлов
 
 // Функция для сортировки одного чанка
 void sortChunk(const std::string& inputFile, const std::string& outputFile) {
-    std::ifstream in(inputFile, std::ios::binary);
-    std::ofstream out(outputFile, std::ios::binary);
+    std::ifstream in(inputFile);
+    std::ofstream out(outputFile);
 
     // Проверка на успешное открытие файлов
     if (!in.is_open()) {
@@ -65,9 +65,9 @@ void sortChunksMultithreaded(const std::vector<std::string>& chunkFiles, std::ve
 
 // Функция для слияния двух файлов
 void mergeFiles(const std::string& file1, const std::string& file2, const std::string& outputFile) {
-    std::ifstream in1(file1, std::ios::binary);
-    std::ifstream in2(file2, std::ios::binary);
-    std::ofstream out(outputFile, std::ios::binary);
+    std::ifstream in1(file1);
+    std::ifstream in2(file2);
+    std::ofstream out(outputFile);
 
     // Проверка на успешное открытие файлов
     if (!in1.is_open() || !in2.is_open()) {
@@ -112,7 +112,7 @@ void mergeChunks(const std::vector<std::string>& sortedChunkFiles, const std::st
 
     // Открываем все файлы и загружаем первые элементы
     for (const auto& sortedFile : sortedChunkFiles) {
-        auto* stream = new std::ifstream(sortedFile, std::ios::binary);
+        auto* stream = new std::ifstream(sortedFile);
         if (!stream->is_open()) {
             std::cerr << "Ошибка: Не удалось открыть файл " << sortedFile << "\n";
             delete stream;
@@ -130,7 +130,7 @@ void mergeChunks(const std::vector<std::string>& sortedChunkFiles, const std::st
         }
     }
 
-    std::ofstream out(outputFile, std::ios::binary);
+    std::ofstream out(outputFile);
     if (!out.is_open()) {
         std::cerr << "Ошибка: Не удалось открыть выходной файл " << outputFile << "\n";
         return;
@@ -169,7 +169,7 @@ int main() {
 
     // Шаг 1: Чтение и разбиение на чанки
     {
-        std::ifstream in(inputFile, std::ios::binary);
+        std::ifstream in(inputFile);
         if (!in.is_open()) {
             std::cerr << "Ошибка: Не удалось открыть входной файл " << inputFile << "\n";
             return -1;
@@ -186,7 +186,7 @@ int main() {
 
             if (!buffer.empty()) {
                 std::string chunkFile = "chunk_" + std::to_string(chunkIndex++) + ".txt";
-                std::ofstream out(chunkFile, std::ios::binary);
+                std::ofstream out(chunkFile);
                 if (!out.is_open()) {
                     std::cerr << "Ошибка: Не удалось создать файл " << chunkFile << "\n";
                     return -1;
