@@ -107,26 +107,28 @@ void mergeFiles(const std::string& file1, const std::string& file2, const std::s
 
 // Многопутевое слияние файлов
 void mergeChunks(const std::vector<std::string>& sortedChunkFiles, const std::string& outputFile) {
-    std::priority_queue<std::pair<int, std::ifstream*>, std::vector<std::pair<int, std::ifstream*>>, std::greater<>> minHeap;
-    std::vector<std::ifstream*> chunkStreams;
+    std::priority_queue<
+        std::pair<int, std::ifstream*>,
+        std::vector<std::pair<int, std::ifstream*>>,
+        std::greater<>
+    > minHeap;
+    std::vector<std::unique_ptr<std::ifstream>> chunkStreams;
 
     // Открываем все файлы и загружаем первые элементы
     for (const auto& sortedFile : sortedChunkFiles) {
-        auto* stream = new std::ifstream(sortedFile);
+        auto stream = std::make_unique<std::ifstream>(sortedFile);
         if (!stream->is_open()) {
             std::cerr << "Ошибка: Не удалось открыть файл " << sortedFile << "\n";
-            delete stream;
             continue;
         }
 
         int num;
         if (*stream >> num) {
-            minHeap.emplace(num, stream);
-            chunkStreams.push_back(stream);
+            minHeap.emplace(num, stream.get());
+            chunkStreams.push_back(std::move(stream));
         }
         else {
             std::cerr << "Ошибка: Пустой файл " << sortedFile << "\n";
-            delete stream;
         }
     }
 
@@ -146,18 +148,9 @@ void mergeChunks(const std::vector<std::string>& sortedChunkFiles, const std::st
         if (*fileStream >> num) {
             minHeap.emplace(num, fileStream);
         }
-        else {
-            delete fileStream; // Закрываем поток, если он исчерпан
-        }
     }
 
     out.close();
-
-    // Закрываем оставшиеся потоки
-    for (auto* stream : chunkStreams) {
-        if (stream->is_open()) stream->close();
-        delete stream;
-    }
 }
 
 int main() {
