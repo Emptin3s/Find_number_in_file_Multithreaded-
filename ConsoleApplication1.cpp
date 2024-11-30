@@ -21,12 +21,12 @@ void sortChunk(std::vector<int>& data) {
 }
 
 // Функция чтения, сортировки и записи кусочка файла
-void sortFileChunk(const std::string& fileName, size_t chunkStart, size_t chunkSize) {
-    std::ifstream in(fileName, std::ios::binary);
-    std::ofstream out(fileName, std::ios::binary | std::ios::in | std::ios::out);
+void sortFileChunk(const std::string& inputFile, const std::string& outputFile, size_t chunkStart, size_t chunkSize) {
+    std::ifstream in(inputFile, std::ios::binary);
+    std::ofstream out(outputFile, std::ios::binary | std::ios::in | std::ios::out);
 
     if (!in.is_open() || !out.is_open()) {
-        std::cerr << "Ошибка открытия файла: " << fileName << "\n";
+        std::cerr << "Ошибка открытия файла: " << inputFile << " или " << outputFile << "\n";
         return;
     }
 
@@ -44,7 +44,7 @@ void sortFileChunk(const std::string& fileName, size_t chunkStart, size_t chunkS
     // Сортируем данные
     sortChunk(buffer);
 
-    // Записываем отсортированные данные обратно
+    // Записываем отсортированные данные в выходной файл
     out.write(reinterpret_cast<const char*>(&buffer[0]), elementsRead * sizeof(int));
 
     in.close();
@@ -52,7 +52,7 @@ void sortFileChunk(const std::string& fileName, size_t chunkStart, size_t chunkS
 }
 
 // Многопоточная сортировка всего файла
-void sortFileMultithreaded(const std::string& fileName, size_t fileSize) {
+void sortFileMultithreaded(const std::string& inputFile, const std::string& tempFile, size_t fileSize) {
     size_t totalElements = fileSize / sizeof(int);
     size_t totalChunks = (totalElements + CHUNK_ELEMENTS - 1) / CHUNK_ELEMENTS; // Округление вверх
 
@@ -63,7 +63,7 @@ void sortFileMultithreaded(const std::string& fileName, size_t fileSize) {
         size_t chunkStart = chunkIndex * CHUNK_ELEMENTS; // Начало чанка
         size_t chunkSize = std::min(CHUNK_ELEMENTS, totalElements - chunkStart); // Размер чанка
 
-        threads.emplace_back(sortFileChunk, fileName, chunkStart, chunkSize);
+        threads.emplace_back(sortFileChunk, inputFile, tempFile, chunkStart, chunkSize);
     }
 
     // Ждем завершения всех потоков
@@ -73,15 +73,15 @@ void sortFileMultithreaded(const std::string& fileName, size_t fileSize) {
 }
 
 // Функция для многопоточного слияния частей
-void mergeSortedChunks(const std::string& fileName, size_t fileSize, size_t chunkSize) {
+void mergeSortedChunks(const std::string& tempFile, const std::string& outputFile, size_t fileSize, size_t chunkSize) {
     size_t totalElements = fileSize / sizeof(int);
     size_t totalChunks = (totalElements + chunkSize - 1) / chunkSize; // Округление вверх
 
-    std::ifstream in(fileName, std::ios::binary);
-    std::ofstream out(fileName + ".sorted", std::ios::binary);
+    std::ifstream in(tempFile, std::ios::binary);
+    std::ofstream out(outputFile, std::ios::binary);
 
     if (!in.is_open() || !out.is_open()) {
-        std::cerr << "Ошибка открытия файла для слияния: " << fileName << "\n";
+        std::cerr << "Ошибка открытия файла для слияния: " << tempFile << " или " << outputFile << "\n";
         return;
     }
 
@@ -98,7 +98,7 @@ void mergeSortedChunks(const std::string& fileName, size_t fileSize, size_t chun
         size_t start = i * chunkSize;
         size_t size = std::min(chunkSize, totalElements - start);
 
-        chunkStreams[i].open(fileName, std::ios::binary);
+        chunkStreams[i].open(tempFile, std::ios::binary);
         chunkStreams[i].seekg(start * sizeof(int));
 
         int num;
@@ -125,19 +125,31 @@ void mergeSortedChunks(const std::string& fileName, size_t fileSize, size_t chun
 
 // Главная функция
 int main() {
-    std::string inputFile = "numbers.bin"; // Входной файл с числами
+    std::string inputFile = "numbers.bin";      // Входной файл с числами
+    std::string tempFile = "temp_sorted.bin";   // Временный файл для промежуточной сортировки
+    std::string outputFile = "sorted_numbers.bin"; // Выходной файл с отсортированными числами
 
     // Получаем размер входного файла
     std::ifstream in(inputFile, std::ios::binary | std::ios::ate);
     size_t fileSize = in.tellg();
     in.close();
 
+    // Создаем временный файл с размерами, равными входному файлу
+    {
+        std::ofstream temp(tempFile, std::ios::binary);
+        temp.seekp(fileSize - 1);
+        temp.write("", 1); // Расширяем временный файл
+    }
+
     // Многопоточная сортировка всего файла
-    sortFileMultithreaded(inputFile, fileSize);
+    sortFileMultithreaded(inputFile, tempFile, fileSize);
 
     // Многопоточное слияние
-    mergeSortedChunks(inputFile, fileSize, CHUNK_ELEMENTS);
+    mergeSortedChunks(tempFile, outputFile, fileSize, CHUNK_ELEMENTS);
 
-    std::cout << "Файл успешно отсортирован.\n";
+    // Удаляем временный файл
+    std::remove(tempFile.c_str());
+
+    std::cout << "Файл успешно отсортирован. Результат сохранен в " << outputFile << "\n";
     return 0;
 }
