@@ -4,207 +4,140 @@
 #include <algorithm>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <queue>
-#include <string>
-#include <iterator>
 #include <functional>
-#include <sstream>
-#include <filesystem>
 
-// Для удобного доступа к файловым операциям
-namespace fs = std::filesystem;
+// Ограничение на использование памяти (1 GB)
+const size_t MEMORY_LIMIT = 1L * 1024 * 1024 * 1024; // 1 GB
+const size_t CHUNK_ELEMENTS = MEMORY_LIMIT / sizeof(int); // Количество элементов в одном куске
 
-// Размер чанка в байтах
-const size_t CHUNK_SIZE = 100 * 1024 * 1024; // 100 MB
+std::mutex mtx; // Для синхронизации потоков
+std::condition_variable cv; // Для координации между потоками
 
-std::mutex mtx; // Для защиты очереди файлов
+// Функция сортировки куска данных
+void sortChunk(std::vector<int>& data) {
+    std::sort(data.begin(), data.end());
+}
 
-// Функция для сортировки одного чанка
-void sortChunk(const std::string& inputFile, const std::string& outputFile) {
-    std::ifstream in(inputFile);
-    std::ofstream out(outputFile);
+// Функция чтения, сортировки и записи кусочка файла
+void sortFileChunk(const std::string& fileName, size_t chunkStart, size_t chunkSize) {
+    std::ifstream in(fileName, std::ios::binary);
+    std::ofstream out(fileName, std::ios::binary | std::ios::in | std::ios::out);
 
-    // Проверка на успешное открытие файлов
-    if (!in.is_open()) {
-        std::cerr << "Ошибка: Не удалось открыть файл " << inputFile << "\n";
-        return;
-    }
-    if (!out.is_open()) {
-        std::cerr << "Ошибка: Не удалось создать файл " << outputFile << "\n";
+    if (!in.is_open() || !out.is_open()) {
+        std::cerr << "Ошибка открытия файла: " << fileName << "\n";
         return;
     }
 
-    // Читаем данные из файла
-    std::vector<int> numbers((std::istream_iterator<int>(in)), std::istream_iterator<int>());
+    // Позиционируемся на начало чанка
+    in.seekg(chunkStart * sizeof(int));
+    out.seekp(chunkStart * sizeof(int));
+
+    // Читаем данные в память
+    std::vector<int> buffer(chunkSize);
+    in.read(reinterpret_cast<char*>(&buffer[0]), chunkSize * sizeof(int));
+
+    size_t elementsRead = in.gcount() / sizeof(int);
+    buffer.resize(elementsRead);
+
+    // Сортируем данные
+    sortChunk(buffer);
+
+    // Записываем отсортированные данные обратно
+    out.write(reinterpret_cast<const char*>(&buffer[0]), elementsRead * sizeof(int));
+
     in.close();
-
-    // Сортируем данные в памяти
-    std::sort(numbers.begin(), numbers.end());
-
-    // Записываем отсортированные данные в новый файл
-    for (int num : numbers) {
-        out << num << "\n";
-    }
     out.close();
 }
 
-// Многопоточная сортировка чанков
-void sortChunksMultithreaded(const std::vector<std::string>& chunkFiles, std::vector<std::string>& sortedChunkFiles) {
+// Многопоточная сортировка всего файла
+void sortFileMultithreaded(const std::string& fileName, size_t fileSize) {
+    size_t totalElements = fileSize / sizeof(int);
+    size_t totalChunks = (totalElements + CHUNK_ELEMENTS - 1) / CHUNK_ELEMENTS; // Округление вверх
+
     std::vector<std::thread> threads;
-    for (const auto& chunkFile : chunkFiles) {
-        std::string sortedFile = chunkFile + ".sorted";
-        sortedChunkFiles.push_back(sortedFile);
-        threads.emplace_back(sortChunk, chunkFile, sortedFile);
+
+    // Разделяем работу на чанки
+    for (size_t chunkIndex = 0; chunkIndex < totalChunks; ++chunkIndex) {
+        size_t chunkStart = chunkIndex * CHUNK_ELEMENTS; // Начало чанка
+        size_t chunkSize = std::min(CHUNK_ELEMENTS, totalElements - chunkStart); // Размер чанка
+
+        threads.emplace_back(sortFileChunk, fileName, chunkStart, chunkSize);
     }
 
     // Ждем завершения всех потоков
-    for (auto& th : threads) {
-        th.join();
+    for (auto& thread : threads) {
+        thread.join();
     }
 }
 
-// Функция для слияния двух файлов
-void mergeFiles(const std::string& file1, const std::string& file2, const std::string& outputFile) {
-    std::ifstream in1(file1);
-    std::ifstream in2(file2);
-    std::ofstream out(outputFile);
+// Функция для многопоточного слияния частей
+void mergeSortedChunks(const std::string& fileName, size_t fileSize, size_t chunkSize) {
+    size_t totalElements = fileSize / sizeof(int);
+    size_t totalChunks = (totalElements + chunkSize - 1) / chunkSize; // Округление вверх
 
-    // Проверка на успешное открытие файлов
-    if (!in1.is_open() || !in2.is_open()) {
-        std::cerr << "Ошибка: Не удалось открыть файлы для слияния.\n";
+    std::ifstream in(fileName, std::ios::binary);
+    std::ofstream out(fileName + ".sorted", std::ios::binary);
+
+    if (!in.is_open() || !out.is_open()) {
+        std::cerr << "Ошибка открытия файла для слияния: " << fileName << "\n";
         return;
     }
 
-    int num1, num2;
-    bool hasNum1 = static_cast<bool>(in1 >> num1); // Явное приведение к bool
-    bool hasNum2 = static_cast<bool>(in2 >> num2); // Явное приведение к bool
+    // Используем минимальную кучу для многопоточного слияния
+    auto cmp = [](const std::pair<int, size_t>& a, const std::pair<int, size_t>& b) {
+        return a.first > b.first; // Для min-heap
+    };
 
-    while (hasNum1 && hasNum2) {
-        if (num1 < num2) {
-            out << num1 << "\n";
-            hasNum1 = static_cast<bool>(in1 >> num1); // Явное приведение
-        }
-        else {
-            out << num2 << "\n";
-            hasNum2 = static_cast<bool>(in2 >> num2); // Явное приведение
-        }
-    }
+    std::priority_queue<std::pair<int, size_t>, std::vector<std::pair<int, size_t>>, decltype(cmp)> minHeap(cmp);
 
-    while (hasNum1) {
-        out << num1 << "\n";
-        hasNum1 = static_cast<bool>(in1 >> num1); // Явное приведение
-    }
+    std::vector<std::ifstream> chunkStreams(totalChunks);
 
-    while (hasNum2) {
-        out << num2 << "\n";
-        hasNum2 = static_cast<bool>(in2 >> num2); // Явное приведение
-    }
+    for (size_t i = 0; i < totalChunks; ++i) {
+        size_t start = i * chunkSize;
+        size_t size = std::min(chunkSize, totalElements - start);
 
-    in1.close();
-    in2.close();
-    out.close();
-}
-
-// Многопутевое слияние файлов
-void mergeChunks(const std::vector<std::string>& sortedChunkFiles, const std::string& outputFile) {
-    std::priority_queue<
-        std::pair<int, std::ifstream*>,
-        std::vector<std::pair<int, std::ifstream*>>,
-        std::greater<>
-    > minHeap;
-    std::vector<std::unique_ptr<std::ifstream>> chunkStreams;
-
-    // Открываем все файлы и загружаем первые элементы
-    for (const auto& sortedFile : sortedChunkFiles) {
-        auto stream = std::make_unique<std::ifstream>(sortedFile);
-        if (!stream->is_open()) {
-            std::cerr << "Ошибка: Не удалось открыть файл " << sortedFile << "\n";
-            continue;
-        }
+        chunkStreams[i].open(fileName, std::ios::binary);
+        chunkStreams[i].seekg(start * sizeof(int));
 
         int num;
-        if (*stream >> num) {
-            minHeap.emplace(num, stream.get());
-            chunkStreams.push_back(std::move(stream));
-        }
-        else {
-            std::cerr << "Ошибка: Пустой файл " << sortedFile << "\n";
+        if (chunkStreams[i].read(reinterpret_cast<char*>(&num), sizeof(int))) {
+            minHeap.emplace(num, i);
         }
     }
 
-    std::ofstream out(outputFile);
-    if (!out.is_open()) {
-        std::cerr << "Ошибка: Не удалось открыть выходной файл " << outputFile << "\n";
-        return;
-    }
-
-    // Обрабатываем кучу
     while (!minHeap.empty()) {
-        auto [num, fileStream] = minHeap.top();
+        auto [num, chunkIndex] = minHeap.top();
         minHeap.pop();
 
-        out << num << "\n";
+        out.write(reinterpret_cast<const char*>(&num), sizeof(int));
 
-        if (*fileStream >> num) {
-            minHeap.emplace(num, fileStream);
+        int nextNum;
+        if (chunkStreams[chunkIndex].read(reinterpret_cast<char*>(&nextNum), sizeof(int))) {
+            minHeap.emplace(nextNum, chunkIndex);
         }
     }
 
+    in.close();
     out.close();
 }
 
+// Главная функция
 int main() {
-    std::string inputFile = "numbers.txt";
-    std::string outputFile = "sorted_numbers.txt";
+    std::string inputFile = "numbers.bin"; // Входной файл с числами
 
-    std::vector<std::string> chunkFiles;
-    std::vector<std::string> sortedChunkFiles;
+    // Получаем размер входного файла
+    std::ifstream in(inputFile, std::ios::binary | std::ios::ate);
+    size_t fileSize = in.tellg();
+    in.close();
 
-    // Шаг 1: Чтение и разбиение на чанки
-    {
-        std::ifstream in(inputFile);
-        if (!in.is_open()) {
-            std::cerr << "Ошибка: Не удалось открыть входной файл " << inputFile << "\n";
-            return -1;
-        }
+    // Многопоточная сортировка всего файла
+    sortFileMultithreaded(inputFile, fileSize);
 
-        size_t chunkIndex = 0;
-        while (!in.eof()) {
-            std::vector<int> buffer;
-            buffer.reserve(CHUNK_SIZE / sizeof(int));
-            int num;
-            while (buffer.size() < CHUNK_SIZE / sizeof(int) && in >> num) {
-                buffer.push_back(num);
-            }
+    // Многопоточное слияние
+    mergeSortedChunks(inputFile, fileSize, CHUNK_ELEMENTS);
 
-            if (!buffer.empty()) {
-                std::string chunkFile = "chunk_" + std::to_string(chunkIndex++) + ".txt";
-                std::ofstream out(chunkFile);
-                if (!out.is_open()) {
-                    std::cerr << "Ошибка: Не удалось создать файл " << chunkFile << "\n";
-                    return -1;
-                }
-
-                for (int n : buffer) {
-                    out << n << "\n";
-                }
-                out.close();
-                chunkFiles.push_back(chunkFile);
-            }
-        }
-        in.close();
-    }
-
-    // Шаг 2: Многопоточная сортировка чанков
-    sortChunksMultithreaded(chunkFiles, sortedChunkFiles);
-
-    // Шаг 3: Слияние чанков в итоговый файл
-    mergeChunks(sortedChunkFiles, outputFile);
-
-    // Удаление временных файлов
-    for (const auto& file : chunkFiles) fs::remove(file);
-    for (const auto& file : sortedChunkFiles) fs::remove(file);
-
-    std::cout << "Сортировка завершена. Результат сохранен в " << outputFile << "\n";
+    std::cout << "Файл успешно отсортирован.\n";
     return 0;
 }
