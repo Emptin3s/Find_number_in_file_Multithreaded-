@@ -4,149 +4,132 @@
 #include <algorithm>
 #include <thread>
 #include <mutex>
-#include <string>
-#include <sstream>
 #include <queue>
+#include <string>
 #include <functional>
+#include <cmath>
 
 // Ограничение памяти для одного чанка (1 ГБ)
-const size_t MEMORY_LIMIT = 1L * 1024 * 1024 * 1024; // 1 ГБ
-// Количество строк в одном чанке, основываясь на размере данных
-const size_t CHUNK_LINES = MEMORY_LIMIT / sizeof(int); // Размер чанка (в строках)
+const size_t MEMORY_LIMIT = 1L * 1024 * 1024 * 1024; // Размер памяти для одного чанка в байтах (1 ГБ)
 
-// Мьютекс для синхронизации потоков при записи в выходной файл
-std::mutex mtx;
+// Максимальное количество чисел, которые можно загрузить в память для сортировки
+const size_t MAX_NUMBERS_IN_MEMORY = MEMORY_LIMIT / sizeof(int); // Максимальное количество чисел, которые помещаются в память
+
+// Мьютекс для синхронизации потоков
+std::mutex mtx; // Используется для предотвращения одновременной записи в файл несколькими потоками
 
 // Функция сортировки данных в одном чанке
 void sortChunk(std::vector<int>& data) {
-    std::sort(data.begin(), data.end()); // Стандартная сортировка
+    std::sort(data.begin(), data.end()); // Сортировка чисел в памяти с использованием стандартного алгоритма
 }
 
-// Функция, которая читает кусочек данных из входного файла, сортирует его и записывает в выходной файл
-void sortFileChunk(const std::string& inputFile, const std::string& outputFile, size_t chunkStart, size_t chunkSize) {
-    std::ifstream in(inputFile);  // Открытие входного файла для чтения
-    std::ofstream out(outputFile, std::ios::in | std::ios::out); // Открытие выходного файла для записи
+// Функция сортировки чанков в многопоточном режиме
+void sortFileChunk(const std::string& inputFile, const std::string& tempFile, size_t chunkStart, size_t chunkSize) {
+    std::ifstream in(inputFile, std::ios::binary); // Открываем входной файл в бинарном режиме
+    std::ofstream out(tempFile, std::ios::binary | std::ios::app); // Открываем временный файл в режиме добавления
 
-    // Проверка, что файлы открылись корректно
     if (!in.is_open() || !out.is_open()) {
-        std::cerr << "Ошибка открытия файла: " << inputFile << " или " << outputFile << "\n";
-        return;
+        // Проверяем, открылись ли файлы
+        std::cerr << "Ошибка открытия файла: " << inputFile << " или " << tempFile << "\n";
+        return; // Завершаем функцию в случае ошибки
     }
 
-    // Пропускаем строки до начала чанка
-    in.seekg(0, std::ios::beg);  // Переход к началу файла
-    size_t currentLine = 0;
-    std::string line;
+    // Перемещаем указатель чтения на начало чанка
+    in.seekg(chunkStart);
 
-    // Пропускаем строки до начала текущего чанка
-    while (currentLine < chunkStart && std::getline(in, line)) {
-        ++currentLine;
+    // Читаем числа из файла
+    std::vector<int> buffer; // Буфер для хранения чисел из текущего чанка
+    size_t numbersRead = 0; // Количество прочитанных чисел
+    while (numbersRead < chunkSize && in) {
+        int num;
+        in >> num; // Считываем число
+        buffer.push_back(num); // Добавляем его в буфер
+        numbersRead++;
     }
 
-    // Чтение данных в память для сортировки
-    std::vector<int> buffer;  // Вектор для хранения данных чанка
-    while (currentLine < chunkStart + chunkSize && std::getline(in, line)) {
-        buffer.push_back(std::stoi(line)); // Чтение числа и добавление в вектор
-        ++currentLine;
-    }
-
-    // Сортировка данных в чанке
+    // Сортируем данные в памяти
     sortChunk(buffer);
 
-    // Позиционируемся на нужное место в выходном файле
-    std::stringstream sortedData;
-    for (const int num : buffer) {
-        sortedData << num << "\n";  // Записываем отсортированные числа в строковый поток
+    // Блокируем мьютекс для записи в файл
+    {
+        std::lock_guard<std::mutex> lock(mtx); // Гарантируем, что запись в файл будет происходить только одним потоком
+        for (const int num : buffer) {
+            out << num << "\n"; // Записываем отсортированные числа в файл
+        }
     }
 
-    // Блокировка мьютекса для безопасной записи в файл
-    std::lock_guard<std::mutex> lock(mtx);
-    out.seekp(0, std::ios::end);  // Переход в конец выходного файла
-    out << sortedData.str();  // Записываем отсортированные данные
-
-    // Закрытие файлов
-    in.close();
-    out.close();
+    in.close(); // Закрываем входной файл
+    out.close(); // Закрываем временный файл
 }
 
-// Функция многопоточной сортировки всего файла
-void sortFileMultithreaded(const std::string& inputFile, const std::string& tempFile, size_t totalLines) {
-    // Вычисление количества чанков, в которые нужно разделить файл
-    size_t totalChunks = (totalLines + CHUNK_LINES - 1) / CHUNK_LINES; // Округление вверх
+// Функция для многопоточной сортировки всего файла
+void sortFileMultithreaded(const std::string& inputFile, const std::string& tempFile, size_t fileSize) {
+    size_t totalChunks = std::ceil(static_cast<double>(fileSize) / MEMORY_LIMIT); // Рассчитываем количество чанков
 
-    std::vector<std::thread> threads;  // Вектор для потоков
+    std::vector<std::thread> threads; // Вектор потоков для параллельной обработки
 
-    // Разделение работы на чанки и создание потоков для сортировки каждого чанка
     for (size_t chunkIndex = 0; chunkIndex < totalChunks; ++chunkIndex) {
-        size_t chunkStart = chunkIndex * CHUNK_LINES;  // Начало текущего чанка
-        size_t chunkSize = std::min(CHUNK_LINES, totalLines - chunkStart);  // Размер чанка (может быть меньше для последнего чанка)
+        size_t chunkStart = chunkIndex * MEMORY_LIMIT; // Начало текущего чанка
+        size_t chunkEnd = std::min(fileSize, (chunkIndex + 1) * MEMORY_LIMIT); // Конец текущего чанка
+        size_t chunkSize = (chunkEnd - chunkStart) / sizeof(int); // Количество чисел в чанке
 
-        // Создание потока для сортировки текущего чанка
+        // Создаем поток для сортировки текущего чанка
         threads.emplace_back(sortFileChunk, inputFile, tempFile, chunkStart, chunkSize);
     }
 
-    // Ожидание завершения всех потоков
+    // Дожидаемся завершения всех потоков
     for (auto& thread : threads) {
         thread.join();
     }
 }
 
-// Функция многопоточного слияния отсортированных частей
-void mergeSortedChunks(const std::string& tempFile, const std::string& outputFile, size_t totalLines, size_t chunkSize) {
-    // Вычисление количества чанков
-    size_t totalChunks = (totalLines + chunkSize - 1) / chunkSize; // Округление вверх
+// Функция слияния отсортированных чанков
+void mergeSortedChunks(const std::string& tempFile, const std::string& outputFile, size_t totalChunks, size_t chunkSize) {
+    std::ifstream in(tempFile); // Открываем временный файл
+    std::ofstream out(outputFile); // Открываем выходной файл
 
-    std::ifstream in(tempFile);  // Открытие временного файла для чтения
-    std::ofstream out(outputFile);  // Открытие выходного файла для записи
-
-    // Проверка открытия файлов
     if (!in.is_open() || !out.is_open()) {
-        std::cerr << "Ошибка открытия файла для слияния: " << tempFile << " или " << outputFile << "\n";
+        // Проверяем, открылись ли файлы
+        std::cerr << "Ошибка открытия файла: " << tempFile << " или " << outputFile << "\n";
         return;
     }
 
-    // Определение компаратора для минимальной кучи (для слияния)
+    // Определяем компаратор для создания мин-кучи
     auto cmp = [](const std::pair<int, size_t>& a, const std::pair<int, size_t>& b) {
-        return a.first > b.first;  // Для min-heap
+        return a.first > b.first;  // Порядок в куче: минимальный элемент в вершине
     };
 
-    // Приоритетная очередь для слияния данных
+    // Создаем мин-кучу
     std::priority_queue<std::pair<int, size_t>, std::vector<std::pair<int, size_t>>, decltype(cmp)> minHeap(cmp);
 
-    std::vector<std::ifstream> chunkStreams(totalChunks);  // Потоки для каждого чанка
-
-    // Инициализация потоков для чтения каждого чанка
+    // Открываем потоки для каждого чанка
+    std::vector<std::ifstream> chunkStreams(totalChunks);
     for (size_t i = 0; i < totalChunks; ++i) {
-        size_t start = i * chunkSize;  // Начало текущего чанка
-        size_t size = std::min(chunkSize, totalLines - start);  // Размер чанка
-
-        chunkStreams[i].open(tempFile);  // Открытие потока для текущего чанка
-        for (size_t j = 0; j < start; ++j) {
-            std::string line;
-            std::getline(chunkStreams[i], line);  // Пропуск строк до начала чанка
-        }
+        chunkStreams[i].open(tempFile); // Открываем временный файл для каждого чанка
+        chunkStreams[i].seekg(i * chunkSize * sizeof(int)); // Перемещаемся к началу чанка
 
         int num;
         if (chunkStreams[i] >> num) {
-            minHeap.emplace(num, i);  // Добавление первого элемента чанка в кучу
+            // Добавляем первый элемент каждого чанка в мин-кучу
+            minHeap.emplace(num, i);
         }
     }
 
-    // Слияние данных с использованием минимальной кучи
     while (!minHeap.empty()) {
-        auto [num, chunkIndex] = minHeap.top();  // Извлекаем минимальное число из кучи
+        // Извлекаем минимальный элемент
+        auto [num, chunkIndex] = minHeap.top();
         minHeap.pop();
 
-        out << num << "\n";  // Записываем число в выходной файл
+        out << num << "\n"; // Записываем минимальный элемент в выходной файл
 
-        // Чтение следующего числа из того же чанка
         int nextNum;
         if (chunkStreams[chunkIndex] >> nextNum) {
-            minHeap.emplace(nextNum, chunkIndex);  // Добавление нового элемента в кучу
+            // Если в чанке есть еще элементы, добавляем следующий элемент в мин-кучу
+            minHeap.emplace(nextNum, chunkIndex);
         }
     }
 
-    // Закрытие всех потоков
+    // Закрываем все потоки
     for (auto& stream : chunkStreams) {
         if (stream.is_open()) stream.close();
     }
@@ -157,36 +140,36 @@ void mergeSortedChunks(const std::string& tempFile, const std::string& outputFil
 
 // Главная функция
 int main() {
+    // Имена файлов
     std::string inputFile = "numbers.txt";       // Входной файл с числами
     std::string tempFile = "temp_sorted.txt";    // Временный файл для промежуточной сортировки
     std::string outputFile = "sorted_numbers.txt"; // Выходной файл с отсортированными числами
 
-    // Подсчитываем количество строк в входном файле
-    size_t totalLines = 0;
-    {
-        std::ifstream in(inputFile);
-        std::string line;
-        while (std::getline(in, line)) {
-            ++totalLines;  // Подсчитываем количество строк
-        }
-        in.close();
+    // Определяем размер входного файла
+    std::ifstream in(inputFile, std::ios::binary | std::ios::ate);
+    if (!in.is_open()) {
+        std::cerr << "Ошибка открытия входного файла: " << inputFile << "\n";
+        return 1;
     }
+    size_t fileSize = in.tellg(); // Получаем размер файла
+    in.close();
 
-    // Создаем временный файл
-    {
-        std::ofstream temp(tempFile);
-        temp.close();  // Закрытие файла сразу после его создания
-    }
+    // Очищаем временный файл
+    std::ofstream temp(tempFile, std::ios::trunc);
+    temp.close();
 
-    // Многопоточная сортировка всего файла
-    sortFileMultithreaded(inputFile, tempFile, totalLines);
+    // Рассчитываем общее количество чанков
+    size_t totalChunks = std::ceil(static_cast<double>(fileSize) / MEMORY_LIMIT);
 
-    // Многопоточное слияние отсортированных частей
-    mergeSortedChunks(tempFile, outputFile, totalLines, CHUNK_LINES);
+    // Выполняем сортировку файла
+    sortFileMultithreaded(inputFile, tempFile, fileSize);
 
-    // Удаление временного файла
+    // Выполняем слияние отсортированных чанков
+    mergeSortedChunks(tempFile, outputFile, totalChunks, MAX_NUMBERS_IN_MEMORY);
+
+    // Удаляем временный файл
     std::remove(tempFile.c_str());
 
     std::cout << "Файл успешно отсортирован. Результат сохранен в " << outputFile << "\n";
-    return 0;
+    return 0; // Возвращаем успешный код завершения
 }
